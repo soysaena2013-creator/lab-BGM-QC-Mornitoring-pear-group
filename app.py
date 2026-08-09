@@ -63,7 +63,6 @@ else:
     df_raw['Parsed_Date'] = pd.to_datetime(df_raw[col_timestamp], errors='coerce')
 
 df_raw['YearMonth'] = df_raw['Parsed_Date'].dt.strftime('%Y-%m')
-# Fill missing dates with current month if invalid
 df_raw['YearMonth'] = df_raw['YearMonth'].fillna('Unspecified')
 
 # --- SIDEBAR FILTERS ---
@@ -119,14 +118,15 @@ machine_stats['SDI'] = np.where(peer_sd > 0, (machine_stats['Lab_Mean'] - peer_m
 machine_stats['Percent_Bias'] = np.where(peer_mean > 0, ((machine_stats['Lab_Mean'] - peer_mean) / peer_mean) * 100, 0)
 machine_stats['CVI'] = np.where(peer_cv > 0, machine_stats['Lab_CV'] / peer_cv, 0)
 
+# --- UPDATED INTERPRETATION LOGIC ---
 def eval_status(sdi):
     abs_sdi = abs(sdi)
-    if abs_sdi <= 1.0:
-        return 'Pass (Good)'
-    elif abs_sdi <= 2.0:
-        return 'Warning (Acceptable)'
+    if abs_sdi <= 2.0:
+        return '🟢 Acceptable'
+    elif abs_sdi <= 3.0:
+        return '🟡 Warning'
     else:
-        return 'Action Required'
+        return '🔴 Unacceptable (Action signal)'
 
 machine_stats['Status'] = machine_stats['SDI'].apply(eval_status)
 
@@ -139,12 +139,14 @@ col4.metric("Peer %CV", f"{peer_cv:.2f}%")
 
 st.divider()
 
-# --- SDI CHART ---
+# --- SDI CHART WITH UPDATED LIMIT LINES ---
 st.subheader(f"📊 กราฟแท่ง SDI (Z-Score) - {selected_level} | เดือน: {selected_month} | แผนก: {selected_dept}")
 
 if peer_n > 0:
     fig = go.Figure()
-    colors_list = machine_stats['SDI'].apply(lambda x: '#2ca02c' if abs(x) <= 1.0 else ('#ff7f0e' if abs(x) <= 2.0 else '#d62728'))
+    colors_list = machine_stats['SDI'].apply(
+        lambda x: '#2ca02c' if abs(x) <= 2.0 else ('#ff7f0e' if abs(x) <= 3.0 else '#d62728')
+    )
     x_labels = machine_stats[col_sn].astype(str) + " (" + machine_stats[col_dept].astype(str) + ")"
     
     fig.add_trace(go.Bar(
@@ -155,13 +157,14 @@ if peer_n > 0:
         textposition='outside'
     ))
     
+    # Reference Limit Lines based on new criteria
     fig.add_hline(y=0, line_dash="solid", line_color="black")
-    fig.add_hline(y=1.0, line_dash="dot", line_color="orange", annotation_text="+1.0 SDI Limit")
-    fig.add_hline(y=-1.0, line_dash="dot", line_color="orange", annotation_text="-1.0 SDI Limit")
-    fig.add_hline(y=2.0, line_dash="dash", line_color="red", annotation_text="+2.0 SDI Limit")
-    fig.add_hline(y=-2.0, line_dash="dash", line_color="red", annotation_text="-2.0 SDI Limit")
+    fig.add_hline(y=2.0, line_dash="dot", line_color="orange", annotation_text="+2.0 SDI (Warning Limit)")
+    fig.add_hline(y=-2.0, line_dash="dot", line_color="orange", annotation_text="-2.0 SDI (Warning Limit)")
+    fig.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="+3.0 SDI (Unacceptable Limit)")
+    fig.add_hline(y=-3.0, line_dash="dash", line_color="red", annotation_text="-3.0 SDI (Unacceptable Limit)")
     
-    y_max = max(3.0, abs(machine_stats['SDI']).max() + 0.5) if len(machine_stats) > 0 else 3.0
+    y_max = max(3.5, abs(machine_stats['SDI']).max() + 0.5) if len(machine_stats) > 0 else 3.5
     fig.update_layout(
         xaxis_title="เครื่องตรวจ (SN) และ แผนก/หน่วยงาน",
         yaxis_title="Standard Deviation Index (SDI)",
@@ -203,7 +206,7 @@ st.dataframe(
     use_container_width=True
 )
 
-# --- PDF GENERATION FUNCTION ---
+# --- PDF GENERATION FUNCTION WITH UPDATED INTERPRETATION ---
 def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, level):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -267,10 +270,10 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, lev
             f"{row['SDI (Z-Score)'] if not pd.isna(row['SDI (Z-Score)']) else 0:+.2f}",
             f"{row['%Bias'] if not pd.isna(row['%Bias']) else 0:+.2f}%",
             f"{row['CVI'] if not pd.isna(row['CVI']) else 0:.2f}",
-            str(row['ผลการประเมิน'])
+            str(row['ผลการประเมิน']).replace('🟢 ', '').replace('🟡 ', '').replace('🔴 ', '')
         ])
     
-    t = Table(table_data, colWidths=[85, 90, 65, 60, 55, 65, 60, 55, 55, 50, 90])
+    t = Table(table_data, colWidths=[80, 90, 65, 60, 55, 65, 60, 55, 55, 45, 130])
     t.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1f77b4')),
         ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
@@ -286,8 +289,8 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, lev
     elements.append(t)
     elements.append(Spacer(1, 20))
     
-    # Footer Guidelines & Signature
-    guide_text = "<b>Interpretation Guidelines:</b> Pass (|SDI| <= 1.0) | Warning (1.0 < |SDI| <= 2.0) | Action Required (|SDI| > 2.0)"
+    # Updated Footer Guidelines in PDF
+    guide_text = "<b>Interpretation Guidelines:</b> Acceptable (|SDI| <= 2.0) | Warning (2.0 < |SDI| <= 3.0) | Unacceptable / Action signal (|SDI| > 3.0)"
     elements.append(Paragraph(guide_text, ParagraphStyle('Guide', parent=styles['Normal'], fontSize=9)))
     elements.append(Spacer(1, 25))
     
