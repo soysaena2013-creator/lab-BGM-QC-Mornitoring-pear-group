@@ -43,8 +43,7 @@ except Exception as e:
     st.error(f"ไม่สามารถโหลดข้อมูลได้ กรุณาตรวจสอบลิงก์: {e}")
     st.stop()
 
-# Column Definitions
-col_sn = 'Serial number (SN) ของเครื่องตรวจ'
+# --- COLUMN DEFINITIONS ---
 col_dept = 'แผนก/หน่วยงาน/หมู่บ้าน'
 col_lot_qc = 'Lot no. ของสารควบคุมคุณภาพ(QC)'
 col_l1 = 'ผลการตรวจ สารควบคุมคุณภาพ(QC) level 1'
@@ -52,11 +51,11 @@ col_l2 = 'ผลการตรวจ สารควบคุมคุณภา
 col_timestamp = 'ประทับเวลา'
 col_date = 'วันที่รายงานผล'
 
-# Data Processing: Dates & Numbers
+# Clean Numeric Data
 df_raw[col_l1] = pd.to_numeric(df_raw[col_l1], errors='coerce')
 df_raw[col_l2] = pd.to_numeric(df_raw[col_l2], errors='coerce')
 
-# Parse Year-Month
+# Process Date & YearMonth
 if col_date in df_raw.columns:
     df_raw['Parsed_Date'] = pd.to_datetime(df_raw[col_date], errors='coerce')
 else:
@@ -64,6 +63,25 @@ else:
 
 df_raw['YearMonth'] = df_raw['Parsed_Date'].dt.strftime('%Y-%m')
 df_raw['YearMonth'] = df_raw['YearMonth'].fillna('Unspecified')
+
+# Dynamic Extract SN Function (ดึงค่า SN จากคอลัมน์ของแผนกที่เลือก)
+def extract_sn(row):
+    dept = str(row[col_dept])
+    # ค้นหาคอลัมน์ที่มีชื่อแผนกตรงกับค่าใน row
+    for col in row.index:
+        if 'Serial number (SN)' in col and dept in col:
+            val = row[col]
+            if pd.notna(val) and str(val).strip() != '':
+                return str(val).strip()
+    # หากไม่พบเฉพาะเจาะจง ให้หาคอลัมน์ SN แรกที่ไม่เป็นค่าว่าง
+    for col in row.index:
+        if 'Serial number (SN)' in col:
+            val = row[col]
+            if pd.notna(val) and str(val).strip() != '':
+                return str(val).strip()
+    return 'N/A'
+
+df_raw['Machine_SN'] = df_raw.apply(extract_sn, axis=1)
 
 # --- SIDEBAR FILTERS ---
 st.sidebar.header("🔍 ตัวกรองการวิเคราะห์")
@@ -98,7 +116,7 @@ if available_lots:
 val_col = col_l1 if selected_level == "Level 1" else col_l2
 
 # --- CALCULATION ENGINE ---
-machine_stats = df_filtered.groupby([col_sn, col_dept]).agg(
+machine_stats = df_filtered.groupby(['Machine_SN', col_dept]).agg(
     Lab_Mean=(val_col, 'mean'),
     Lab_SD=(val_col, 'std'),
     N_Count=(val_col, 'count')
@@ -118,7 +136,7 @@ machine_stats['SDI'] = np.where(peer_sd > 0, (machine_stats['Lab_Mean'] - peer_m
 machine_stats['Percent_Bias'] = np.where(peer_mean > 0, ((machine_stats['Lab_Mean'] - peer_mean) / peer_mean) * 100, 0)
 machine_stats['CVI'] = np.where(peer_cv > 0, machine_stats['Lab_CV'] / peer_cv, 0)
 
-# --- UPDATED INTERPRETATION LOGIC ---
+# --- INTERPRETATION LOGIC ---
 def eval_status(sdi):
     abs_sdi = abs(sdi)
     if abs_sdi <= 2.0:
@@ -139,7 +157,7 @@ col4.metric("Peer %CV", f"{peer_cv:.2f}%")
 
 st.divider()
 
-# --- SDI CHART WITH UPDATED LIMIT LINES ---
+# --- SDI CHART ---
 st.subheader(f"📊 กราฟแท่ง SDI (Z-Score) - {selected_level} | เดือน: {selected_month} | แผนก: {selected_dept}")
 
 if peer_n > 0:
@@ -147,7 +165,7 @@ if peer_n > 0:
     colors_list = machine_stats['SDI'].apply(
         lambda x: '#2ca02c' if abs(x) <= 2.0 else ('#ff7f0e' if abs(x) <= 3.0 else '#d62728')
     )
-    x_labels = machine_stats[col_sn].astype(str) + " (" + machine_stats[col_dept].astype(str) + ")"
+    x_labels = machine_stats['Machine_SN'].astype(str) + " (" + machine_stats[col_dept].astype(str) + ")"
     
     fig.add_trace(go.Bar(
         x=x_labels,
@@ -157,7 +175,6 @@ if peer_n > 0:
         textposition='outside'
     ))
     
-    # Reference Limit Lines based on new criteria
     fig.add_hline(y=0, line_dash="solid", line_color="black")
     fig.add_hline(y=2.0, line_dash="dot", line_color="orange", annotation_text="+2.0 SDI (Warning Limit)")
     fig.add_hline(y=-2.0, line_dash="dot", line_color="orange", annotation_text="-2.0 SDI (Warning Limit)")
@@ -166,7 +183,7 @@ if peer_n > 0:
     
     y_max = max(3.5, abs(machine_stats['SDI']).max() + 0.5) if len(machine_stats) > 0 else 3.5
     fig.update_layout(
-        xaxis_title="เครื่องตรวจ (SN) และ แผนก/หน่วยงาน",
+        xaxis_title="เครื่องตรวจ (SN / PIN) และ แผนก/หน่วยงาน",
         yaxis_title="Standard Deviation Index (SDI)",
         yaxis=dict(range=[-y_max, y_max]),
         height=450
@@ -177,7 +194,7 @@ if peer_n > 0:
 st.subheader("📋 ตารางสรุปผล Peer Group รายเครื่อง")
 
 rename_dict = {
-    col_sn: 'Serial Number (SN)',
+    'Machine_SN': 'Serial Number / PIN',
     col_dept: 'แผนก/หน่วยงาน',
     'Lab_Mean': 'ค่าเฉลี่ยเครื่อง (Mean)',
     'Lab_SD': 'ค่า SD เครื่อง',
@@ -206,7 +223,7 @@ st.dataframe(
     use_container_width=True
 )
 
-# --- PDF GENERATION FUNCTION WITH UPDATED INTERPRETATION ---
+# --- PDF GENERATION FUNCTION ---
 def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, level):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -253,14 +270,13 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, lev
     elements.append(Paragraph(meta_info, subtitle_style))
     elements.append(Spacer(1, 10))
     
-    # Table Data Formatting
     table_data = [
-        ['SN', 'Department', 'Lab Mean', 'Lab SD', '%CV', 'Peer Mean', 'Peer SD', 'SDI', '%Bias', 'CVI', 'Status']
+        ['SN / PIN', 'Department', 'Lab Mean', 'Lab SD', '%CV', 'Peer Mean', 'Peer SD', 'SDI', '%Bias', 'CVI', 'Status']
     ]
     
     for _, row in df_report.iterrows():
         table_data.append([
-            str(row['Serial Number (SN)']),
+            str(row['Serial Number / PIN']),
             str(row['แผนก/หน่วยงาน']),
             f"{row['ค่าเฉลี่ยเครื่อง (Mean)']:.2f}",
             f"{row['ค่า SD เครื่อง']:.2f}",
@@ -273,7 +289,7 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, lev
             str(row['ผลการประเมิน']).replace('🟢 ', '').replace('🟡 ', '').replace('🔴 ', '')
         ])
     
-    t = Table(table_data, colWidths=[80, 90, 65, 60, 55, 65, 60, 55, 55, 45, 130])
+    t = Table(table_data, colWidths=[95, 90, 60, 55, 50, 60, 55, 50, 50, 45, 130])
     t.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1f77b4')),
         ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
@@ -289,7 +305,6 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, lev
     elements.append(t)
     elements.append(Spacer(1, 20))
     
-    # Updated Footer Guidelines in PDF
     guide_text = "<b>Interpretation Guidelines:</b> Acceptable (|SDI| <= 2.0) | Warning (2.0 < |SDI| <= 3.0) | Unacceptable / Action signal (|SDI| > 3.0)"
     elements.append(Paragraph(guide_text, ParagraphStyle('Guide', parent=styles['Normal'], fontSize=9)))
     elements.append(Spacer(1, 25))
