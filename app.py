@@ -21,7 +21,7 @@ st.title("🩸 Blood Glucose Monitor (BGM) Inter-lab Peer Group Dashboard")
 st.markdown("ระบบประมวลผล QC และเปรียบเทียบ performance ระหว่างเครื่องตรวจน้ำตาลเจาะปลายนิ้ว (Peer Group Analysis)")
 
 # --- DEFAULT GOOGLE SHEETS LINK ---
-DEFAULT_SHEETS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR9es9a9qTs-HRBHsV_uZsFcZczKhRmKpiQVPV8djZANufaYV2EvUg1cO6Q26vwp877AN0ZH9HHhBYr/pub?gid=1644746857&single=true&output=csv"
+DEFAULT_SHEETS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTQeFkTVumXOf3h3Luo3VOBwBrZzlrPRTRTMplSM2U-76i6papYP8qtyekfIFCsi1EX7lUo7fBF13b-/pub?gid=728378443&single=true&output=csv"
 
 # --- SIDEBAR CONFIG ---
 st.sidebar.header("⚙️ การเชื่อมต่อข้อมูล")
