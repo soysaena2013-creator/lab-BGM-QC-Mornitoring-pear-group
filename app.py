@@ -67,13 +67,11 @@ df_raw['YearMonth'] = df_raw['YearMonth'].fillna('Unspecified')
 # Dynamic Extract SN Function (ดึงค่า SN จากคอลัมน์ของแผนกที่เลือก)
 def extract_sn(row):
     dept = str(row[col_dept])
-    # ค้นหาคอลัมน์ที่มีชื่อแผนกตรงกับค่าใน row
     for col in row.index:
         if 'Serial number (SN)' in col and dept in col:
             val = row[col]
             if pd.notna(val) and str(val).strip() != '':
                 return str(val).strip()
-    # หากไม่พบเฉพาะเจาะจง ให้หาคอลัมน์ SN แรกที่ไม่เป็นค่าว่าง
     for col in row.index:
         if 'Serial number (SN)' in col:
             val = row[col]
@@ -90,9 +88,9 @@ st.sidebar.header("🔍 ตัวกรองการวิเคราะห�
 available_months = sorted([str(m) for m in df_raw['YearMonth'].unique() if str(m) != 'nan'], reverse=True)
 selected_month = st.sidebar.selectbox("เลือกเดือน:", ["ทั้งหมด"] + available_months)
 
-# 2. Department Filter
+# 2. Department Filter (ใช้เพื่อซ่อน/แสดงผล ไม่นำไปใช้ในการคำนวณค่า Peer)
 available_depts = sorted([str(d) for d in df_raw[col_dept].dropna().unique().tolist()])
-selected_dept = st.sidebar.selectbox("เลือกแผนก/หน่วยงาน:", ["ทั้งหมด"] + available_depts)
+selected_dept = st.sidebar.selectbox("เลือกแผนก/หน่วยงาน (เพื่อแสดงผล):", ["ทั้งหมด"] + available_depts)
 
 # 3. Lot QC Filter
 available_lots = [str(x) for x in df_raw[col_lot_qc].dropna().unique().tolist()]
@@ -101,31 +99,34 @@ selected_lot = st.sidebar.selectbox("เลือก Lot no. ของ QC:", ava
 # 4. Level QC Filter
 selected_level = st.sidebar.radio("เลือกระดับ QC:", ["Level 1", "Level 2"])
 
-# --- FILTERING DATASET ---
-df_filtered = df_raw.copy()
+
+# ==============================================================================
+# --- STEP 1: คำนวณ PEER GROUP STATS จากภาพรวมทั้งหมด (ไม่กรองแผนก) ---
+# ==============================================================================
+df_peer_base = df_raw.copy()
 
 if selected_month != "ทั้งหมด":
-    df_filtered = df_filtered[df_filtered['YearMonth'] == selected_month]
-
-if selected_dept != "ทั้งหมด":
-    df_filtered = df_filtered[df_filtered[col_dept].astype(str) == selected_dept]
+    df_peer_base = df_peer_base[df_peer_base['YearMonth'] == selected_month]
 
 if available_lots:
-    df_filtered = df_filtered[df_filtered[col_lot_qc].astype(str) == str(selected_lot)]
+    df_peer_base = df_peer_base[df_peer_base[col_lot_qc].astype(str) == str(selected_lot)]
 
 val_col = col_l1 if selected_level == "Level 1" else col_l2
 
-# ดึงเฉพาะแถวที่มีค่า QC ถูกต้อง
-df_valid_qc = df_filtered.dropna(subset=[val_col])
+# ดึงเฉพาะแถวที่มีค่า QC ถูกต้องจาก "ทุกแผนก"
+df_valid_peer_qc = df_peer_base.dropna(subset=[val_col])
 
-# --- CALCULATION ENGINE (คำนวณ PEER GROUP จากข้อมูลรวมทั้งหมด) ---
-peer_n = len(df_valid_qc)  # จำนวนข้อมูล QC ทั้งหมด
-peer_mean = df_valid_qc[val_col].mean() if peer_n > 0 else 0
-peer_sd = df_valid_qc[val_col].std() if peer_n > 1 else 0
+# ค่าสถิติ Peer Group สากล (Overall Peer Statistics)
+peer_n = len(df_valid_peer_qc)
+peer_mean = df_valid_peer_qc[val_col].mean() if peer_n > 0 else 0
+peer_sd = df_valid_peer_qc[val_col].std() if peer_n > 1 else 0
 peer_cv = (peer_sd / peer_mean * 100) if peer_mean > 0 else 0
 
-# สถิติจำนวนเครื่องแยกรายเครื่อง
-machine_stats = df_valid_qc.groupby(['Machine_SN', col_dept]).agg(
+
+# ==============================================================================
+# --- STEP 2: คำนวณค่าของแต่ละเครื่อง และเทียบกับ PEER GROUP สากล ---
+# ==============================================================================
+machine_stats = df_valid_peer_qc.groupby(['Machine_SN', col_dept]).agg(
     Lab_Mean=(val_col, 'mean'),
     Lab_SD=(val_col, 'std'),
     N_Count=(val_col, 'count')
@@ -134,14 +135,13 @@ machine_stats = df_valid_qc.groupby(['Machine_SN', col_dept]).agg(
 machine_stats['Lab_SD'] = machine_stats['Lab_SD'].fillna(0)
 machine_stats['Lab_CV'] = np.where(machine_stats['Lab_Mean'] > 0, (machine_stats['Lab_SD'] / machine_stats['Lab_Mean']) * 100, 0)
 
-# กำหนดค่า Peer Stat สากลให้กับทุกเครื่อง
+# นำค่า Peer Group สากล (จาก Step 1) มาใช้กับทุกเครื่อง
 machine_stats['Peer_Mean'] = peer_mean
 machine_stats['Peer_SD'] = peer_sd
 machine_stats['SDI'] = np.where(peer_sd > 0, (machine_stats['Lab_Mean'] - peer_mean) / peer_sd, 0)
 machine_stats['Percent_Bias'] = np.where(peer_mean > 0, ((machine_stats['Lab_Mean'] - peer_mean) / peer_mean) * 100, 0)
 machine_stats['CVI'] = np.where(peer_cv > 0, machine_stats['Lab_CV'] / peer_cv, 0)
 
-# --- INTERPRETATION LOGIC ---
 def eval_status(sdi):
     abs_sdi = abs(sdi)
     if abs_sdi <= 2.0:
@@ -153,30 +153,40 @@ def eval_status(sdi):
 
 machine_stats['Status'] = machine_stats['SDI'].apply(eval_status)
 
-# --- METRICS DISPLAY ---
+
+# ==============================================================================
+# --- STEP 3: กรองแผนกเฉพาะเพื่อการแสดงผล (DISPLAY DISPLAY ONLY) ---
+# ==============================================================================
+if selected_dept != "ทั้งหมด":
+    machine_stats_display = machine_stats[machine_stats[col_dept].astype(str) == selected_dept].copy()
+else:
+    machine_stats_display = machine_stats.copy()
+
+
+# --- METRICS DISPLAY (แสดงค่า Peer Group ภาพรวมเสมอ ไม่เปลี่ยนตามการเลือกแผนก) ---
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("จำนวนข้อมูลรวม (Total N)", f"{peer_n} รายการ ({len(machine_stats)} เครื่อง)")
-col2.metric(f"Peer Mean ({selected_level})", f"{peer_mean:.2f} mg/dL")
-col3.metric("Peer SD", f"{peer_sd:.2f}")
-col4.metric("Peer %CV", f"{peer_cv:.2f}%")
+col1.metric("จำนวนข้อมูล Peer ภาพรวม (Total N)", f"{peer_n} รายการ ({len(machine_stats)} เครื่อง)")
+col2.metric(f"Peer Mean ภาพรวม ({selected_level})", f"{peer_mean:.2f} mg/dL")
+col3.metric("Peer SD ภาพรวม", f"{peer_sd:.2f}")
+col4.metric("Peer %CV ภาพรวม", f"{peer_cv:.2f}%")
 
 st.divider()
 
 # --- SDI CHART ---
-st.subheader(f"📊 กราฟแท่ง SDI (Z-Score) - {selected_level} | เดือน: {selected_month} | แผนก: {selected_dept}")
+st.subheader(f"📊 กราฟแท่ง SDI (Z-Score) - {selected_level} | เดือน: {selected_month} | แสดงผล: {selected_dept}")
 
-if len(machine_stats) > 0:
+if len(machine_stats_display) > 0:
     fig = go.Figure()
-    colors_list = machine_stats['SDI'].apply(
+    colors_list = machine_stats_display['SDI'].apply(
         lambda x: '#2ca02c' if abs(x) <= 2.0 else ('#ff7f0e' if abs(x) <= 3.0 else '#d62728')
     )
-    x_labels = machine_stats['Machine_SN'].astype(str) + " (" + machine_stats[col_dept].astype(str) + ")"
+    x_labels = machine_stats_display['Machine_SN'].astype(str) + " (" + machine_stats_display[col_dept].astype(str) + ")"
     
     fig.add_trace(go.Bar(
         x=x_labels,
-        y=machine_stats['SDI'],
+        y=machine_stats_display['SDI'],
         marker_color=colors_list,
-        text=machine_stats['SDI'].round(2),
+        text=machine_stats_display['SDI'].round(2),
         textposition='outside'
     ))
     
@@ -186,7 +196,7 @@ if len(machine_stats) > 0:
     fig.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="+3.0 SDI (Unacceptable Limit)")
     fig.add_hline(y=-3.0, line_dash="dash", line_color="red", annotation_text="-3.0 SDI (Unacceptable Limit)")
     
-    y_max = max(3.5, abs(machine_stats['SDI']).max() + 0.5) if len(machine_stats) > 0 else 3.5
+    y_max = max(3.5, abs(machine_stats_display['SDI']).max() + 0.5) if len(machine_stats_display) > 0 else 3.5
     fig.update_layout(
         xaxis_title="เครื่องตรวจ (SN / PIN) และ แผนก/หน่วยงาน",
         yaxis_title="Standard Deviation Index (SDI)",
@@ -204,23 +214,23 @@ rename_dict = {
     'Lab_Mean': 'ค่าเฉลี่ยเครื่อง (Mean)',
     'Lab_SD': 'ค่า SD เครื่อง',
     'Lab_CV': '%CV เครื่อง',
-    'Peer_Mean': 'Peer Mean',
-    'Peer_SD': 'Peer SD',
+    'Peer_Mean': 'Peer Mean (ภาพรวม)',
+    'Peer_SD': 'Peer SD (ภาพรวม)',
     'SDI': 'SDI (Z-Score)',
     'Percent_Bias': '%Bias',
     'CVI': 'CVI',
     'Status': 'ผลการประเมิน'
 }
 
-df_display = machine_stats[list(rename_dict.keys())].rename(columns=rename_dict)
+df_display = machine_stats_display[list(rename_dict.keys())].rename(columns=rename_dict)
 
 st.dataframe(
     df_display.style.format({
         'ค่าเฉลี่ยเครื่อง (Mean)': '{:.2f}',
         'ค่า SD เครื่อง': '{:.2f}',
         '%CV เครื่อง': '{:.2f}%',
-        'Peer Mean': '{:.2f}',
-        'Peer SD': '{:.2f}',
+        'Peer Mean (ภาพรวม)': '{:.2f}',
+        'Peer SD (ภาพรวม)': '{:.2f}',
         'SDI (Z-Score)': '{:+.2f}',
         '%Bias': '{:+.2f}%',
         'CVI': '{:.2f}'
@@ -256,7 +266,6 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
         spaceAfter=15
     )
     
-    # Text styles for table cells to allow auto word-wrap
     cell_style = ParagraphStyle(
         'CellStyle',
         parent=styles['Normal'],
@@ -274,7 +283,6 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
     
     elements = []
     
-    # Header
     elements.append(Paragraph("<b>INTER-LABORATORY PEER GROUP ANALYSIS REPORT</b>", title_style))
     elements.append(Paragraph("<b>Blood Glucose Monitoring System (BGM QC Monitoring)</b>", ParagraphStyle('Sub', parent=title_style, fontSize=12)))
     
@@ -283,15 +291,14 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
     <b>Department Filter:</b> {dept} &nbsp;&nbsp;|&nbsp;&nbsp; 
     <b>QC Control Level:</b> {level} &nbsp;&nbsp;|&nbsp;&nbsp; 
     <b>QC Lot No.:</b> {lot}<br/>
-    <b>Peer Group Mean:</b> {peer_m:.2f} mg/dL &nbsp;&nbsp;|&nbsp;&nbsp; 
-    <b>Peer Group SD:</b> {peer_s:.2f} &nbsp;&nbsp;|&nbsp;&nbsp; 
-    <b>Peer Group %CV:</b> {peer_c:.2f}% &nbsp;&nbsp;|&nbsp;&nbsp; 
-    <b>Total QC Runs (N):</b> {peer_n_total} ({len(df_report)} เครื่อง)
+    <b>Overall Peer Group Mean:</b> {peer_m:.2f} mg/dL &nbsp;&nbsp;|&nbsp;&nbsp; 
+    <b>Overall Peer Group SD:</b> {peer_s:.2f} &nbsp;&nbsp;|&nbsp;&nbsp; 
+    <b>Overall Peer Group %CV:</b> {peer_c:.2f}% &nbsp;&nbsp;|&nbsp;&nbsp; 
+    <b>Total Peer QC Runs (N):</b> {peer_n_total}
     """
     elements.append(Paragraph(meta_info, subtitle_style))
     elements.append(Spacer(1, 10))
     
-    # Headers
     table_data = [
         [
             Paragraph("SN / PIN", cell_header_style),
@@ -308,7 +315,6 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
         ]
     ]
     
-    # Data Rows
     for _, row in df_report.iterrows():
         table_data.append([
             Paragraph(str(row['Serial Number / PIN']), cell_style),
@@ -316,15 +322,14 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
             Paragraph(f"{row['ค่าเฉลี่ยเครื่อง (Mean)']:.2f}", cell_style),
             Paragraph(f"{row['ค่า SD เครื่อง']:.2f}", cell_style),
             Paragraph(f"{row['%CV เครื่อง']:.2f}%", cell_style),
-            Paragraph(f"{row['Peer Mean']:.2f}", cell_style),
-            Paragraph(f"{row['Peer SD']:.2f}", cell_style),
+            Paragraph(f"{row['Peer Mean (ภาพรวม)']:.2f}", cell_style),
+            Paragraph(f"{row['Peer SD (ภาพรวม)']:.2f}", cell_style),
             Paragraph(f"{row['SDI (Z-Score)'] if not pd.isna(row['SDI (Z-Score)']) else 0:+.2f}", cell_style),
             Paragraph(f"{row['%Bias'] if not pd.isna(row['%Bias']) else 0:+.2f}%", cell_style),
             Paragraph(f"{row['CVI'] if not pd.isna(row['CVI']) else 0:.2f}", cell_style),
             Paragraph(str(row['ผลการประเมิน']).replace('🟢 ', '').replace('🟡 ', '').replace('🔴 ', ''), cell_style)
         ])
     
-    # Adjusted Column Widths
     col_widths = [140, 85, 55, 50, 45, 55, 50, 45, 50, 40, 110]
     
     t = Table(table_data, colWidths=col_widths)
