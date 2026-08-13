@@ -5,10 +5,13 @@ import plotly.graph_objects as go
 from io import BytesIO
 
 # ReportLab Imports for PDF Generation
+import urllib.request
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -155,7 +158,7 @@ machine_stats['Status'] = machine_stats['SDI'].apply(eval_status)
 
 
 # ==============================================================================
-# --- STEP 3: กรองแผนกเฉพาะเพื่อการแสดงผล (DISPLAY DISPLAY ONLY) ---
+# --- STEP 3: กรองแผนกเฉพาะเพื่อการแสดงผล (DISPLAY ONLY) ---
 # ==============================================================================
 if selected_dept != "ทั้งหมด":
     machine_stats_display = machine_stats[machine_stats[col_dept].astype(str) == selected_dept].copy()
@@ -238,8 +241,31 @@ st.dataframe(
     use_container_width=True
 )
 
+
+# --- HELPER FUNCTION: DOWNLOAD & REGISTER THAI FONT FOR PDF ---
+@st.cache_resource
+def register_thai_font():
+    try:
+        font_url = "https://github.com/google/fonts/raw/main/ofl/sarabun/Sarabun-Regular.ttf"
+        font_bold_url = "https://github.com/google/fonts/raw/main/ofl/sarabun/Sarabun-Bold.ttf"
+        
+        font_data = urllib.request.urlopen(font_url).read()
+        font_bold_data = urllib.request.urlopen(font_bold_url).read()
+        
+        font_buffer = BytesIO(font_data)
+        font_bold_buffer = BytesIO(font_bold_data)
+        
+        pdfmetrics.registerFont(TTFont('THSarabun', font_buffer))
+        pdfmetrics.registerFont(TTFont('THSarabun-Bold', font_bold_buffer))
+        return 'THSarabun', 'THSarabun-Bold'
+    except Exception:
+        return 'Helvetica', 'Helvetica-Bold'
+
+
 # --- PDF GENERATION FUNCTION ---
 def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, dept, lot, level):
+    font_reg, font_bold = register_thai_font()
+    
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -251,40 +277,44 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
     )
     
     styles = getSampleStyleSheet()
+    
     title_style = ParagraphStyle(
         'TitleStyle',
-        parent=styles['Heading1'],
+        fontName=font_bold,
         fontSize=18,
         alignment=1,
-        spaceAfter=10
+        spaceAfter=5
     )
+    
     subtitle_style = ParagraphStyle(
         'SubTitleStyle',
-        parent=styles['Normal'],
-        fontSize=10,
+        fontName=font_reg,
+        fontSize=11,
         alignment=0,
-        spaceAfter=15
+        spaceAfter=12
     )
     
     cell_style = ParagraphStyle(
         'CellStyle',
-        parent=styles['Normal'],
-        fontSize=8,
-        alignment=1
+        fontName=font_reg,
+        fontSize=9,
+        alignment=1,
+        leading=11
     )
+    
     cell_header_style = ParagraphStyle(
         'HeaderStyle',
-        parent=styles['Normal'],
-        fontSize=8,
+        fontName=font_bold,
+        fontSize=9,
         alignment=1,
         textColor=colors.whitesmoke,
-        fontName='Helvetica-Bold'
+        leading=11
     )
     
     elements = []
     
     elements.append(Paragraph("<b>INTER-LABORATORY PEER GROUP ANALYSIS REPORT</b>", title_style))
-    elements.append(Paragraph("<b>Blood Glucose Monitoring System (BGM QC Monitoring)</b>", ParagraphStyle('Sub', parent=title_style, fontSize=12)))
+    elements.append(Paragraph("<b>Blood Glucose Monitoring System (BGM QC Monitoring)</b>", ParagraphStyle('Sub', parent=title_style, fontName=font_bold, fontSize=13)))
     
     meta_info = f"""
     <b>Period (Month):</b> {month} &nbsp;&nbsp;|&nbsp;&nbsp; 
@@ -299,6 +329,7 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
     elements.append(Paragraph(meta_info, subtitle_style))
     elements.append(Spacer(1, 10))
     
+    # Headers
     table_data = [
         [
             Paragraph("SN / PIN", cell_header_style),
@@ -315,6 +346,7 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
         ]
     ]
     
+    # Data Rows
     for _, row in df_report.iterrows():
         table_data.append([
             Paragraph(str(row['Serial Number / PIN']), cell_style),
@@ -330,25 +362,25 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
             Paragraph(str(row['ผลการประเมิน']).replace('🟢 ', '').replace('🟡 ', '').replace('🔴 ', ''), cell_style)
         ])
     
-    col_widths = [140, 85, 55, 50, 45, 55, 50, 45, 50, 40, 110]
+    col_widths = [130, 95, 55, 50, 45, 55, 50, 45, 50, 40, 110]
     
     t = Table(table_data, colWidths=col_widths)
     t.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1f77b4')),
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('BOTTOMPADDING', (0,0), (-1,0), 6),
-        ('TOPPADDING', (0,0), (-1,0), 6),
+        ('BOTTOMPADDING', (0,0), (-1,0), 5),
+        ('TOPPADDING', (0,0), (-1,0), 5),
         ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#f7f9fa')),
         ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
     ]))
     
     elements.append(t)
-    elements.append(Spacer(1, 20))
+    elements.append(Spacer(1, 15))
     
     guide_text = "<b>Interpretation Guidelines:</b> Acceptable (|SDI| <= 2.0) | Warning (2.0 < |SDI| <= 3.0) | Unacceptable / Action signal (|SDI| > 3.0)"
-    elements.append(Paragraph(guide_text, ParagraphStyle('Guide', parent=styles['Normal'], fontSize=9)))
-    elements.append(Spacer(1, 25))
+    elements.append(Paragraph(guide_text, ParagraphStyle('Guide', fontName=font_reg, fontSize=9)))
+    elements.append(Spacer(1, 20))
     
     sig_table = Table([
         ['Reported By: ___________________________', 'Reviewed By: ___________________________'],
@@ -356,6 +388,7 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
     ], colWidths=[380, 380])
     sig_table.setStyle(TableStyle([
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,-1), font_reg),
         ('FONTSIZE', (0,0), (-1,-1), 9),
     ]))
     elements.append(sig_table)
@@ -363,6 +396,7 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
     doc.build(elements)
     buffer.seek(0)
     return buffer
+
 
 # --- DOWNLOAD BUTTONS ---
 st.divider()
