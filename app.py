@@ -115,8 +115,17 @@ if available_lots:
 
 val_col = col_l1 if selected_level == "Level 1" else col_l2
 
-# --- CALCULATION ENGINE ---
-machine_stats = df_filtered.groupby(['Machine_SN', col_dept]).agg(
+# ดึงเฉพาะแถวที่มีค่า QC ถูกต้อง
+df_valid_qc = df_filtered.dropna(subset=[val_col])
+
+# --- CALCULATION ENGINE (คำนวณ PEER GROUP จากข้อมูลรวมทั้งหมด) ---
+peer_n = len(df_valid_qc)  # จำนวนข้อมูล QC ทั้งหมด
+peer_mean = df_valid_qc[val_col].mean() if peer_n > 0 else 0
+peer_sd = df_valid_qc[val_col].std() if peer_n > 1 else 0
+peer_cv = (peer_sd / peer_mean * 100) if peer_mean > 0 else 0
+
+# สถิติจำนวนเครื่องแยกรายเครื่อง
+machine_stats = df_valid_qc.groupby(['Machine_SN', col_dept]).agg(
     Lab_Mean=(val_col, 'mean'),
     Lab_SD=(val_col, 'std'),
     N_Count=(val_col, 'count')
@@ -125,11 +134,7 @@ machine_stats = df_filtered.groupby(['Machine_SN', col_dept]).agg(
 machine_stats['Lab_SD'] = machine_stats['Lab_SD'].fillna(0)
 machine_stats['Lab_CV'] = np.where(machine_stats['Lab_Mean'] > 0, (machine_stats['Lab_SD'] / machine_stats['Lab_Mean']) * 100, 0)
 
-peer_mean = machine_stats['Lab_Mean'].mean() if len(machine_stats) > 0 else 0
-peer_sd = machine_stats['Lab_Mean'].std() if len(machine_stats) > 1 else 0
-peer_cv = (peer_sd / peer_mean * 100) if peer_mean > 0 else 0
-peer_n = len(machine_stats)
-
+# กำหนดค่า Peer Stat สากลให้กับทุกเครื่อง
 machine_stats['Peer_Mean'] = peer_mean
 machine_stats['Peer_SD'] = peer_sd
 machine_stats['SDI'] = np.where(peer_sd > 0, (machine_stats['Lab_Mean'] - peer_mean) / peer_sd, 0)
@@ -150,7 +155,7 @@ machine_stats['Status'] = machine_stats['SDI'].apply(eval_status)
 
 # --- METRICS DISPLAY ---
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("จำนวนเครื่องในกลุ่ม (Peer N)", f"{peer_n} เครื่อง")
+col1.metric("จำนวนข้อมูลรวม (Total N)", f"{peer_n} รายการ ({len(machine_stats)} เครื่อง)")
 col2.metric(f"Peer Mean ({selected_level})", f"{peer_mean:.2f} mg/dL")
 col3.metric("Peer SD", f"{peer_sd:.2f}")
 col4.metric("Peer %CV", f"{peer_cv:.2f}%")
@@ -160,7 +165,7 @@ st.divider()
 # --- SDI CHART ---
 st.subheader(f"📊 กราฟแท่ง SDI (Z-Score) - {selected_level} | เดือน: {selected_month} | แผนก: {selected_dept}")
 
-if peer_n > 0:
+if len(machine_stats) > 0:
     fig = go.Figure()
     colors_list = machine_stats['SDI'].apply(
         lambda x: '#2ca02c' if abs(x) <= 2.0 else ('#ff7f0e' if abs(x) <= 3.0 else '#d62728')
@@ -224,7 +229,7 @@ st.dataframe(
 )
 
 # --- PDF GENERATION FUNCTION ---
-def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, level):
+def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, dept, lot, level):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -251,6 +256,22 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, lev
         spaceAfter=15
     )
     
+    # Text styles for table cells to allow auto word-wrap
+    cell_style = ParagraphStyle(
+        'CellStyle',
+        parent=styles['Normal'],
+        fontSize=8,
+        alignment=1
+    )
+    cell_header_style = ParagraphStyle(
+        'HeaderStyle',
+        parent=styles['Normal'],
+        fontSize=8,
+        alignment=1,
+        textColor=colors.whitesmoke,
+        fontName='Helvetica-Bold'
+    )
+    
     elements = []
     
     # Header
@@ -265,41 +286,56 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, month, dept, lot, lev
     <b>Peer Group Mean:</b> {peer_m:.2f} mg/dL &nbsp;&nbsp;|&nbsp;&nbsp; 
     <b>Peer Group SD:</b> {peer_s:.2f} &nbsp;&nbsp;|&nbsp;&nbsp; 
     <b>Peer Group %CV:</b> {peer_c:.2f}% &nbsp;&nbsp;|&nbsp;&nbsp; 
-    <b>Total Analyzers (N):</b> {len(df_report)}
+    <b>Total QC Runs (N):</b> {peer_n_total} ({len(df_report)} เครื่อง)
     """
     elements.append(Paragraph(meta_info, subtitle_style))
     elements.append(Spacer(1, 10))
     
+    # Headers
     table_data = [
-        ['SN / PIN', 'Department', 'Lab Mean', 'Lab SD', '%CV', 'Peer Mean', 'Peer SD', 'SDI', '%Bias', 'CVI', 'Status']
+        [
+            Paragraph("SN / PIN", cell_header_style),
+            Paragraph("Department", cell_header_style),
+            Paragraph("Lab Mean", cell_header_style),
+            Paragraph("Lab SD", cell_header_style),
+            Paragraph("%CV", cell_header_style),
+            Paragraph("Peer Mean", cell_header_style),
+            Paragraph("Peer SD", cell_header_style),
+            Paragraph("SDI", cell_header_style),
+            Paragraph("%Bias", cell_header_style),
+            Paragraph("CVI", cell_header_style),
+            Paragraph("Status", cell_header_style)
+        ]
     ]
     
+    # Data Rows
     for _, row in df_report.iterrows():
         table_data.append([
-            str(row['Serial Number / PIN']),
-            str(row['แผนก/หน่วยงาน']),
-            f"{row['ค่าเฉลี่ยเครื่อง (Mean)']:.2f}",
-            f"{row['ค่า SD เครื่อง']:.2f}",
-            f"{row['%CV เครื่อง']:.2f}%",
-            f"{row['Peer Mean']:.2f}",
-            f"{row['Peer SD']:.2f}",
-            f"{row['SDI (Z-Score)'] if not pd.isna(row['SDI (Z-Score)']) else 0:+.2f}",
-            f"{row['%Bias'] if not pd.isna(row['%Bias']) else 0:+.2f}%",
-            f"{row['CVI'] if not pd.isna(row['CVI']) else 0:.2f}",
-            str(row['ผลการประเมิน']).replace('🟢 ', '').replace('🟡 ', '').replace('🔴 ', '')
+            Paragraph(str(row['Serial Number / PIN']), cell_style),
+            Paragraph(str(row['แผนก/หน่วยงาน']), cell_style),
+            Paragraph(f"{row['ค่าเฉลี่ยเครื่อง (Mean)']:.2f}", cell_style),
+            Paragraph(f"{row['ค่า SD เครื่อง']:.2f}", cell_style),
+            Paragraph(f"{row['%CV เครื่อง']:.2f}%", cell_style),
+            Paragraph(f"{row['Peer Mean']:.2f}", cell_style),
+            Paragraph(f"{row['Peer SD']:.2f}", cell_style),
+            Paragraph(f"{row['SDI (Z-Score)'] if not pd.isna(row['SDI (Z-Score)']) else 0:+.2f}", cell_style),
+            Paragraph(f"{row['%Bias'] if not pd.isna(row['%Bias']) else 0:+.2f}%", cell_style),
+            Paragraph(f"{row['CVI'] if not pd.isna(row['CVI']) else 0:.2f}", cell_style),
+            Paragraph(str(row['ผลการประเมิน']).replace('🟢 ', '').replace('🟡 ', '').replace('🔴 ', ''), cell_style)
         ])
     
-    t = Table(table_data, colWidths=[95, 90, 60, 55, 50, 60, 55, 50, 50, 45, 130])
+    # Adjusted Column Widths
+    col_widths = [140, 85, 55, 50, 45, 55, 50, 45, 50, 40, 110]
+    
+    t = Table(table_data, colWidths=col_widths)
     t.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1f77b4')),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 9),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
         ('BOTTOMPADDING', (0,0), (-1,0), 6),
+        ('TOPPADDING', (0,0), (-1,0), 6),
         ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#f7f9fa')),
         ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('FONTSIZE', (0,1), (-1,-1), 8),
     ]))
     
     elements.append(t)
@@ -340,7 +376,7 @@ with c1:
 with c2:
     if not df_display.empty:
         pdf_bytes = generate_pdf_report(
-            df_display, peer_mean, peer_sd, peer_cv,
+            df_display, peer_mean, peer_sd, peer_cv, peer_n,
             selected_month, selected_dept, selected_lot, selected_level
         )
         st.download_button(
