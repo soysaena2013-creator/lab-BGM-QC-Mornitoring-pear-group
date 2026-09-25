@@ -52,18 +52,13 @@ col_lot_qc = 'Lot no. ของสารควบคุมคุณภาพ(QC)
 col_l1 = 'ผลการตรวจ สารควบคุมคุณภาพ(QC) level 1'
 col_l2 = 'ผลการตรวจ สารควบคุมคุณภาพ(QC) level 2'
 col_timestamp = 'ประทับเวลา'
-col_date = 'วันที่รายงานผล'
 
 # Clean Numeric Data
 df_raw[col_l1] = pd.to_numeric(df_raw[col_l1], errors='coerce')
 df_raw[col_l2] = pd.to_numeric(df_raw[col_l2], errors='coerce')
 
-# Process Date & YearMonth
-if col_date in df_raw.columns:
-    df_raw['Parsed_Date'] = pd.to_datetime(df_raw[col_date], errors='coerce')
-else:
-    df_raw['Parsed_Date'] = pd.to_datetime(df_raw[col_timestamp], errors='coerce')
-
+# --- FIX: บังคับใช้คอลัมน์ 'ประทับเวลา' (Timestamp วันที่ทำการทดสอบจริง) ---
+df_raw['Parsed_Date'] = pd.to_datetime(df_raw[col_timestamp], errors='coerce')
 df_raw['YearMonth'] = df_raw['Parsed_Date'].dt.strftime('%Y-%m')
 df_raw['YearMonth'] = df_raw['YearMonth'].fillna('Unspecified')
 
@@ -87,9 +82,9 @@ df_raw['Machine_SN'] = df_raw.apply(extract_sn, axis=1)
 # --- SIDEBAR FILTERS ---
 st.sidebar.header("🔍 ตัวกรองการวิเคราะห์")
 
-# 1. Monthly Filter
-available_months = sorted([str(m) for m in df_raw['YearMonth'].unique() if str(m) != 'nan'], reverse=True)
-selected_month = st.sidebar.selectbox("เลือกเดือน:", ["ทั้งหมด"] + available_months)
+# 1. Monthly Filter (ผูกกับเดือนที่ทำการทดสอบจาก ประทับเวลา)
+available_months = sorted([str(m) for m in df_raw['YearMonth'].unique() if str(m) not in ['nan', 'Unspecified']], reverse=True)
+selected_month = st.sidebar.selectbox("เลือกเดือนที่ทำการทดสอบ:", ["ทั้งหมด"] + available_months)
 
 # 2. Department Filter (ใช้เพื่อซ่อน/แสดงผล ไม่นำไปใช้ในการคำนวณค่า Peer)
 available_depts = sorted([str(d) for d in df_raw[col_dept].dropna().unique().tolist()])
@@ -166,7 +161,7 @@ else:
     machine_stats_display = machine_stats.copy()
 
 
-# --- METRICS DISPLAY (แสดงค่า Peer Group ภาพรวมเสมอ ไม่เปลี่ยนตามการเลือกแผนก) ---
+# --- METRICS DISPLAY ---
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("จำนวนข้อมูล Peer ภาพรวม (Total N)", f"{peer_n} รายการ ({len(machine_stats)} เครื่อง)")
 col2.metric(f"Peer Mean ภาพรวม ({selected_level})", f"{peer_mean:.2f} mg/dL")
@@ -176,7 +171,7 @@ col4.metric("Peer %CV ภาพรวม", f"{peer_cv:.2f}%")
 st.divider()
 
 # --- SDI CHART ---
-st.subheader(f"📊 กราฟแท่ง SDI (Z-Score) - {selected_level} | เดือน: {selected_month} | แสดงผล: {selected_dept}")
+st.subheader(f"📊 กราฟแท่ง SDI (Z-Score) - {selected_level} | เดือนที่ทดสอบ: {selected_month} | แสดงผล: {selected_dept}")
 
 if len(machine_stats_display) > 0:
     fig = go.Figure()
@@ -317,7 +312,7 @@ def generate_pdf_report(df_report, peer_m, peer_s, peer_c, peer_n_total, month, 
     elements.append(Paragraph("<b>Blood Glucose Monitoring System (BGM QC Monitoring)</b>", ParagraphStyle('Sub', parent=title_style, fontName=font_bold, fontSize=13)))
     
     meta_info = f"""
-    <b>Period (Month):</b> {month} &nbsp;&nbsp;|&nbsp;&nbsp; 
+    <b>Testing Period (Month):</b> {month} &nbsp;&nbsp;|&nbsp;&nbsp; 
     <b>Department Filter:</b> {dept} &nbsp;&nbsp;|&nbsp;&nbsp; 
     <b>QC Control Level:</b> {level} &nbsp;&nbsp;|&nbsp;&nbsp; 
     <b>QC Lot No.:</b> {lot}<br/>
