@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from io import BytesIO
+import re
 
 # ReportLab Imports for PDF Generation
 import urllib.request
@@ -33,6 +34,42 @@ sheets_url = st.sidebar.text_input(
     value=DEFAULT_SHEETS_URL
 )
 
+# --- HELPER FUNCTION: ROBUST DATE PARSER (THAI YEAR & MULTI-FORMAT SUPPORT) ---
+def parse_thai_or_iso_date(date_str):
+    if pd.isna(date_str) or not str(date_str).strip():
+        return pd.NaT
+    
+    s = str(date_str).strip()
+    
+    # 1. ลองแปลงด้วย pd.to_datetime โดยตั้ง dayfirst=True
+    try:
+        dt = pd.to_datetime(s, dayfirst=True, errors='coerce')
+        if pd.notna(dt):
+            # หากปีมากกว่า 2400 แสดงว่าเป็นปี พ.ศ. ให้ลบ 543
+            if dt.year > 2400:
+                dt = dt.replace(year=dt.year - 543)
+            return dt
+    except Exception:
+        pass
+    
+    # 2. กรณีรูปแบบ string แบบมีตัวเลขสแลช หรือ ขีด
+    parts = re.split(r'[/.\-\s]', s)
+    if len(parts) >= 3:
+        try:
+            p1, p2, p3 = int(parts[0]), int(parts[1]), int(parts[2])
+            # ถ้าส่วนแรกเป็นปี (4 หลัก)
+            if p1 > 1000:
+                year = p1 - 543 if p1 > 2400 else p1
+                return pd.Timestamp(year=year, month=p2, day=p3)
+            # ถ้าส่วนท้ายเป็นปี (4 หลัก)
+            elif p3 > 1000:
+                year = p3 - 543 if p3 > 2400 else p3
+                return pd.Timestamp(year=year, month=p2, day=p1)
+        except Exception:
+            pass
+            
+    return pd.NaT
+
 # --- DATA LOADING & CLEANING ---
 @st.cache_data(ttl=30)
 def load_data(url):
@@ -52,13 +89,25 @@ col_lot_qc = 'Lot no. ของสารควบคุมคุณภาพ(QC)
 col_l1 = 'ผลการตรวจ สารควบคุมคุณภาพ(QC) level 1'
 col_l2 = 'ผลการตรวจ สารควบคุมคุณภาพ(QC) level 2'
 col_timestamp = 'ประทับเวลา'
+col_date = 'วันที่รายงานผล'
 
 # Clean Numeric Data
 df_raw[col_l1] = pd.to_numeric(df_raw[col_l1], errors='coerce')
 df_raw[col_l2] = pd.to_numeric(df_raw[col_l2], errors='coerce')
 
-# --- FIX: บังคับใช้คอลัมน์ 'ประทับเวลา' (Timestamp วันที่ทำการทดสอบจริง) ---
-df_raw['Parsed_Date'] = pd.to_datetime(df_raw[col_timestamp], errors='coerce')
+# --- FIX: ROBUST DATE CONVERSION & MONTH EXTRACT ---
+target_date_col = col_timestamp if col_timestamp in df_raw.columns else (col_date if col_date in df_raw.columns else None)
+
+if target_date_col:
+    df_raw['Parsed_Date'] = df_raw[target_date_col].apply(parse_thai_or_iso_date)
+else:
+    # ค้นหาคอลัมน์ที่มีคำว่า วันที่ หรือ ประทับเวลา
+    date_cols = [c for c in df_raw.columns if 'ประทับ' in c or 'วัน' in c or 'date' in c.lower()]
+    if date_cols:
+        df_raw['Parsed_Date'] = df_raw[date_cols[0]].apply(parse_thai_or_iso_date)
+    else:
+        df_raw['Parsed_Date'] = pd.NaT
+
 df_raw['YearMonth'] = df_raw['Parsed_Date'].dt.strftime('%Y-%m')
 df_raw['YearMonth'] = df_raw['YearMonth'].fillna('Unspecified')
 
@@ -82,11 +131,11 @@ df_raw['Machine_SN'] = df_raw.apply(extract_sn, axis=1)
 # --- SIDEBAR FILTERS ---
 st.sidebar.header("🔍 ตัวกรองการวิเคราะห์")
 
-# 1. Monthly Filter (ผูกกับเดือนที่ทำการทดสอบจาก ประทับเวลา)
-available_months = sorted([str(m) for m in df_raw['YearMonth'].unique() if str(m) not in ['nan', 'Unspecified']], reverse=True)
+# 1. Monthly Filter
+available_months = sorted([str(m) for m in df_raw['YearMonth'].unique() if str(m) not in ['nan', 'None', 'Unspecified', 'NaT']], reverse=True)
 selected_month = st.sidebar.selectbox("เลือกเดือนที่ทำการทดสอบ:", ["ทั้งหมด"] + available_months)
 
-# 2. Department Filter (ใช้เพื่อซ่อน/แสดงผล ไม่นำไปใช้ในการคำนวณค่า Peer)
+# 2. Department Filter
 available_depts = sorted([str(d) for d in df_raw[col_dept].dropna().unique().tolist()])
 selected_dept = st.sidebar.selectbox("เลือกแผนก/หน่วยงาน (เพื่อแสดงผล):", ["ทั้งหมด"] + available_depts)
 
